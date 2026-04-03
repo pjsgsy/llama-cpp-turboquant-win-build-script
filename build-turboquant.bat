@@ -220,7 +220,7 @@ if exist "build\bin\Release\llama-server.exe" (
     echo  Example usage:
     echo ============================================
     echo.
-    echo build\bin\Release\llama-server.exe --models-dir C:\Users\Paulhome\llama\models\ --fit on --ctx-size 40000 --port 8080 --host 0.0.0.0 --temp 0.6 --top-p 0.95 --min-p 0.00 --sleep-idle-seconds 300 --jinja --flash-attn on --repeat-penalty 1.0 --threads 6 --threads-batch 12 --cache-type-k q8_0 --cache-type-v q8_0 -ot "ffn_gate_exps=CPU","ffn_up_exps=CPU","ffn_down_exps=CPU" -np 1 --batch-size 1024 --ubatch-size 256 --timeout 3600 --models-max 1 --mlock --poll 1
+    echo build\bin\Release\llama-server.exe --models-dir C:\Users\Paulhome\llama\models\ --fit on --ctx-size 40000 --port 8080 --host 0.0.0.0 --temp 0.6 --top-p 0.95 --min-p 0.00 --sleep-idle-seconds 300 --jinja --flash-attn on --repeat-penalty 1.0 --threads 6 --threads-batch 12 --cache-type-k q8_0 --cache-type-v turbo3 -ot "ffn_gate_exps=CPU","ffn_up_exps=CPU","ffn_down_exps=CPU" -np 1 --batch-size 1024 --ubatch-size 256 --timeout 3600 --models-max 1 --mlock --poll 1
     echo.
 ) else (
     echo [WARN] llama-server.exe not found in build output!
