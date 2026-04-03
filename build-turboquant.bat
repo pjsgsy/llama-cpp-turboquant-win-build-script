@@ -83,28 +83,21 @@ echo.
 
 REM Patch to fix Windows cross-DLL symbol visibility bugs on the turboquant branch.
 REM Bug 1: turbo3_cpu_wht_group_size in ggml-turbo-quant.c (C) referenced from
-REM   ggml-cpu/ops.cpp (C++) without extern "C" - fixed with C++ shim in ggml-cpu.
-REM Bug 2: g_innerq_finalized, g_innerq_scale_inv_host, turbo_innerq_* in
-REM   ggml-cuda/turbo-innerq.cu referenced from src/llama-kv-cache.cpp (llama target)
-REM   without DLL export - fixed with C++ shim in llama src.
+REM   ggml-cpu/ops.cpp (C++) - fixed with C++ shim in ggml-cpu.
+REM NOTE: Bug 2 (turbo_innerq_* shim) was removed - llama-kv-cache.cpp already has
+REM   proper #ifdef GGML_USE_CUDA dllimport guards; a shim causes LNK2005 duplicates.
+REM
+REM Also ensure src/CMakeLists.txt does NOT contain llama-turbo-shim.cpp (clean up
+REM any remnant from a previous version of this script).
 set "PATCH_MARKER=build\.turboquant_patch_applied"
 if not exist "%PATCH_MARKER%" (
     echo [PATCH] Fixing Windows cross-DLL symbol visibility...
     REM Bug 1 fix: C++ shim for ggml-cpu
     echo int turbo3_cpu_wht_group_size = 0;> ggml\src\ggml-cpu\ggml-turbo-shim.cpp
     powershell -NoProfile -Command "$f='ggml\src\ggml-cpu\CMakeLists.txt';$lines=Get-Content $f;$out=@();$added=0;foreach($l in $lines){$out+=$l;if(-not $added -and $l -match 'ggml-cpu/ops.cpp'){$out+='        ggml-cpu/ggml-turbo-shim.cpp';$added=1}};if(-not $added){$out+='        ggml-cpu/ggml-turbo-shim.cpp'};Set-Content $f $out" 2>nul
-    REM Bug 2 fix: C++ shim for llama src
-    (
-        echo #ifndef GGML_USE_CUDA
-        echo #define GGML_USE_CUDA
-        echo #endif
-        echo static bool g_innerq_tensor_needs_update = false;
-        echo bool  g_innerq_finalized = false;
-        echo float g_innerq_scale_inv_host[128] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-        echo bool turbo_innerq_needs_tensor_update^(^) { return g_innerq_tensor_needs_update; }
-        echo void turbo_innerq_mark_tensor_updated^(^) { g_innerq_tensor_needs_update = false; }
-    ) > src\llama-turbo-shim.cpp
-    powershell -NoProfile -Command "$f='src\CMakeLists.txt';$lines=Get-Content $f;$out=@();$added=0;foreach($l in $lines){$out+=$l;if(-not $added -and $l -match 'llama-vocab.cpp'){$out+='    llama-turbo-shim.cpp';$added=1}};if(-not $added){$out+='    llama-turbo-shim.cpp'};Set-Content $f $out" 2>nul
+    REM Ensure Bug 2 shim is absent from src/CMakeLists.txt (idempotent cleanup)
+    powershell -NoProfile -Command "$f='src\CMakeLists.txt';$lines=Get-Content $f;$out=$lines | Where-Object { $_ -notmatch 'llama-turbo-shim' };Set-Content $f $out" 2>nul
+    if exist "src\llama-turbo-shim.cpp" del /f /q "src\llama-turbo-shim.cpp" 2>nul
     if not exist "build" mkdir build 2>nul
     echo patched > "%PATCH_MARKER%"
     echo   [OK] CMakeLists patched.
@@ -227,7 +220,7 @@ if exist "build\bin\Release\llama-server.exe" (
     echo  Example usage:
     echo ============================================
     echo.
-    echo build\bin\Release\llama-server.exe --models-dir C:\Users\Paulhome\llama\models\ --fit on --ctx-size 40000 --port 8080 --host 0.0.0.0 --temp 0.6 --top-p 0.95 --min-p 0.00 --sleep-idle-seconds 300 --jinja --flash-attn on --repeat-penalty 1.0 --threads 6 --threads-batch 12 --cache-type-k q8_0 --cache-type-v turbo3 -ot "ffn_gate_exps=CPU","ffn_up_exps=CPU","ffn_down_exps=CPU" -np 1 --batch-size 1024 --ubatch-size 256 --timeout 3600 --models-max 1 --mlock --poll 1
+    echo build\bin\Release\llama-server.exe --models-dir C:\Users\Paulhome\llama\models\ --fit on --ctx-size 40000 --port 8080 --host 0.0.0.0 --temp 0.6 --top-p 0.95 --min-p 0.00 --sleep-idle-seconds 300 --jinja --flash-attn on --repeat-penalty 1.0 --threads 6 --threads-batch 12 --cache-type-k q8_0 --cache-type-v q8_0 -ot "ffn_gate_exps=CPU","ffn_up_exps=CPU","ffn_down_exps=CPU" -np 1 --batch-size 1024 --ubatch-size 256 --timeout 3600 --models-max 1 --mlock --poll 1
     echo.
 ) else (
     echo [WARN] llama-server.exe not found in build output!
