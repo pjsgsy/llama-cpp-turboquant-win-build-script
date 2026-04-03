@@ -70,6 +70,47 @@ if not exist "llama-cpp-turboquant" (
 
 cd llama-cpp-turboquant
 
+echo [SETUP] Getting kv-cache feature branch...
+git checkout feature/turboquant-kv-cache
+if errorlevel 1 (
+	echo.
+	echo [ERROR] Failed to checkout kv-cache feature branch.
+	echo.
+	goto :fail_pause
+)
+echo [OK] On branch: feature/turboquant-kv-cache
+echo.
+
+REM Patch to fix Windows cross-DLL symbol visibility bugs on the turboquant branch.
+REM Bug 1: turbo3_cpu_wht_group_size in ggml-turbo-quant.c (C) referenced from
+REM   ggml-cpu/ops.cpp (C++) without extern "C" - fixed with C++ shim in ggml-cpu.
+REM Bug 2: g_innerq_finalized, g_innerq_scale_inv_host, turbo_innerq_* in
+REM   ggml-cuda/turbo-innerq.cu referenced from src/llama-kv-cache.cpp (llama target)
+REM   without DLL export - fixed with C++ shim in llama src.
+set "PATCH_MARKER=build\.turboquant_patch_applied"
+if not exist "%PATCH_MARKER%" (
+    echo [PATCH] Fixing Windows cross-DLL symbol visibility...
+    REM Bug 1 fix: C++ shim for ggml-cpu
+    echo int turbo3_cpu_wht_group_size = 0;> ggml\src\ggml-cpu\ggml-turbo-shim.cpp
+    powershell -NoProfile -Command "$f='ggml\src\ggml-cpu\CMakeLists.txt';$lines=Get-Content $f;$out=@();$added=0;foreach($l in $lines){$out+=$l;if(-not $added -and $l -match 'ggml-cpu/ops.cpp'){$out+='        ggml-cpu/ggml-turbo-shim.cpp';$added=1}};if(-not $added){$out+='        ggml-cpu/ggml-turbo-shim.cpp'};Set-Content $f $out" 2>nul
+    REM Bug 2 fix: C++ shim for llama src
+    (
+        echo #ifndef GGML_USE_CUDA
+        echo #define GGML_USE_CUDA
+        echo #endif
+        echo static bool g_innerq_tensor_needs_update = false;
+        echo bool  g_innerq_finalized = false;
+        echo float g_innerq_scale_inv_host[128] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+        echo bool turbo_innerq_needs_tensor_update^(^) { return g_innerq_tensor_needs_update; }
+        echo void turbo_innerq_mark_tensor_updated^(^) { g_innerq_tensor_needs_update = false; }
+    ) > src\llama-turbo-shim.cpp
+    powershell -NoProfile -Command "$f='src\CMakeLists.txt';$lines=Get-Content $f;$out=@();$added=0;foreach($l in $lines){$out+=$l;if(-not $added -and $l -match 'llama-vocab.cpp'){$out+='    llama-turbo-shim.cpp';$added=1}};if(-not $added){$out+='    llama-turbo-shim.cpp'};Set-Content $f $out" 2>nul
+    if not exist "build" mkdir build 2>nul
+    echo patched > "%PATCH_MARKER%"
+    echo   [OK] CMakeLists patched.
+    echo.
+)
+
 echo [1/4] Pulling latest updates...
 git pull
 if errorlevel 1 (
@@ -92,20 +133,28 @@ echo.
 REM ============================================================
 REM  BUILD
 REM ============================================================
-if exist "build\CMakeCache.txt" (
-    echo [INFO] Existing build found. Doing incremental build (faster^).
-    echo   To force a full clean rebuild, run:  rmdir /s /q build   then re-run this script.
+REM The turboquant branch has a different CMake structure than main.
+REM Always do a clean build to avoid stale DLL conflicts.
+if exist "build" (
+    echo [INFO] Cleaning old build directory for a fresh build...
+    del /f /q build\bin\Release\*.exe 2>nul
+    del /f /q build\bin\Release\*.dll 2>nul
+    rmdir /s /q build 2>nul
+    echo   [OK] Build cleaned.
     echo.
 )
 
 echo [3/4] Configuring build with CMake...
+REM Use "native" to compile only for the GPU(s) actually in this machine.
+REM DO NOT list 120a/121a (Blackwell) unless you have an RTX 5000 — those
+REM archs take hours to compile and stall MSBuild nodes on non-Blackwell systems.
 echo   Backend:        CUDA
 echo   Generator:      Visual Studio 17 2022
-echo   Architectures:  86;89;120a;121a
+echo   Architectures:  native (auto-detect your GPU)
 echo   Build type:     Release
 echo.
 
-cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=86;89;120a;121a -G "Visual Studio 17 2022"
+cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=native -DCMAKE_C_FLAGS="/D_USE_MATH_DEFINES" -DCMAKE_CXX_FLAGS="/D_USE_MATH_DEFINES" -G "Visual Studio 17 2022"
 if errorlevel 1 (
     echo.
     echo [ERROR] CMake configuration failed!
@@ -119,31 +168,38 @@ echo.
 
 echo [4/4] Building Release configuration...
 echo   First build may take 20-60 minutes (CUDA compilation is slow).
-echo   Using %NUMBER_OF_PROCESSORS% parallel jobs.
+echo   Using parallel jobs (capped at 8 to avoid CUDA/MSBuild deadlock).
 echo   Subsequent builds will be much faster.
 echo.
 
+REM Cap parallelism at 8 — too many MSBuild nodes with CUDA can deadlock.
+REM /nodeReuse:false prevents stale build nodes from causing hangs on retry.
 set "MSBUILD_EXE=MSBuild"
 where MSBuild >nul 2>&1 || (
     for /f "usebackq tokens=* delims=" %%m in (`"%VSWHERE_EXE%" -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe 2^>nul`) do set "MSBUILD_EXE=%%m"
 )
-echo   Building... (output suppressed, check return code)
-"%MSBUILD_EXE%" build\ALL_BUILD.vcxproj /p:Configuration=Release /p:Platform=x64 /m:%NUMBER_OF_PROCESSORS% /nologo /v:q > "%TEMP%\llama-build.log" 2>&1
+set /a BUILD_JOBS=%NUMBER_OF_PROCESSORS%
+if %BUILD_JOBS% GTR 8 set BUILD_JOBS=8
+echo   Building with %BUILD_JOBS% jobs...
+"%MSBUILD_EXE%" build\ALL_BUILD.vcxproj /p:Configuration=Release /p:Platform=x64 /m:%BUILD_JOBS% /nodeReuse:false /nologo /v:m > "%TEMP%\llama-build.log" 2>&1
 set BUILD_RC=%ERRORLEVEL%
 if %BUILD_RC% EQU 0 (
     echo   Build completed successfully.
 ) else (
+    echo   --- Build errors: ---
     type "%TEMP%\llama-build.log" | findstr /I "error"
+    echo   --- Full log saved at: %TEMP%\llama-build.log ---
 )
-del /q "%TEMP%\llama-build.log" >nul 2>&1
 echo.
 if %BUILD_RC% NEQ 0 (
     echo [ERROR] Build failed!
     echo   Run this to see full output:
     echo     msbuild build\ALL_BUILD.vcxproj /p:Configuration=Release /v:normal
+    echo   Or check: %TEMP%\llama-build.log
     echo.
     goto :fail_pause
 )
+del /q "%TEMP%\llama-build.log" >nul 2>&1
 echo   [OK] Build complete.
 echo.
 
@@ -171,7 +227,7 @@ if exist "build\bin\Release\llama-server.exe" (
     echo  Example usage:
     echo ============================================
     echo.
-    echo build\bin\Release\llama-server.exe --models-dir C:\Users\Paulhome\llama\models\ --fit on --ctx-size 40000 --port 8080 --host 0.0.0.0 --temp 0.6 --top-p 0.95 --min-p 0.00 --sleep-idle-seconds 300 --jinja --flash-attn on --repeat-penalty 1.0 --threads 6 --threads-batch 12 --cache-type-k q8_0 --cache-type-v q8_0 -ot "ffn_gate_exps=CPU","ffn_up_exps=CPU","ffn_down_exps=CPU" -np 1 --batch-size 1024 --ubatch-size 256 --timeout 3600 --models-max 1 --mlock --poll 1
+    echo build\bin\Release\llama-server.exe --models-dir C:\Users\Paulhome\llama\models\ --fit on --ctx-size 40000 --port 8080 --host 0.0.0.0 --temp 0.6 --top-p 0.95 --min-p 0.00 --sleep-idle-seconds 300 --jinja --flash-attn on --repeat-penalty 1.0 --threads 6 --threads-batch 12 --cache-type-k q8_0 --cache-type-v turbo3 -ot "ffn_gate_exps=CPU","ffn_up_exps=CPU","ffn_down_exps=CPU" -np 1 --batch-size 1024 --ubatch-size 256 --timeout 3600 --models-max 1 --mlock --poll 1
     echo.
 ) else (
     echo [WARN] llama-server.exe not found in build output!
