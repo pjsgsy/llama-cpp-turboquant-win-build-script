@@ -1,4 +1,4 @@
-Full build script for my Win11/VisualStudio/CUDA12.9 setup
+Full build script for my Win11/VisualStudio/CUDA12.9 setup and Tom's llama fork with turboquant support from here https://github.com/TheTom/llama-cpp-turboquant
 
 I had a fair few issues trying to build this and had to employ some agentic assistance!  
 I figured I would share the script in case anyone else on Win wanted to try this, but got
